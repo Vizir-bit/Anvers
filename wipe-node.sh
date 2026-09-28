@@ -67,9 +67,9 @@ section() { say ""; say "== $*"; }
 # Every running process as: pid ppid user executable (the executable may contain spaces).
 process_table() { ps -axww -o pid=,ppid=,user=,comm= 2>/dev/null; }
 
-node_rows() {  # processes whose executable is called node or nodejs
+node_rows() {  # processes whose executable is called node, nodejs or node_repl
   process_table | while read -r pid ppid user exe; do
-    case ${exe##*/} in node | nodejs) printf '%s %s %s %s\n' "$pid" "$ppid" "$user" "$exe" ;; esac
+    case ${exe##*/} in node | nodejs | node_repl) printf '%s %s %s %s\n' "$pid" "$ppid" "$user" "$exe" ;; esac
   done
 }
 
@@ -347,14 +347,14 @@ describe_app() {  # $1 = bundle
 
 # ---- files -----------------------------------------------------------------
 
-node_files() {  # Mach-O executables named node or nodejs, in the places runtimes live
+node_files() {  # Mach-O executables named node, nodejs or node_repl, in the places runtimes live
   local root
   for root in /Applications "$TARGET_HOME/Applications" /usr/local /opt \
     "/Library/Application Support" "$TARGET_HOME/Library/Application Support" \
     "$TARGET_HOME/.nvm" "$TARGET_HOME/.volta" "$TARGET_HOME/.fnm" "$TARGET_HOME/.asdf" \
     "$TARGET_HOME/.local" "$TARGET_HOME/n" "$TARGET_HOME/.n"; do
     [ -d "$root" ] || continue
-    find "$root" \( -name node -o -name nodejs \) -type f -perm -100 2>/dev/null
+    find "$root" \( -name node -o -name nodejs -o -name node_repl \) -type f -perm -100 2>/dev/null
   done | sort -u | while IFS= read -r f; do
     case $(file -b "$f" 2>/dev/null) in Mach-O*) printf '%s\n' "$f" ;; esac
   done
@@ -418,7 +418,7 @@ remove_bundle() {  # $1 = bundle
     return
   fi
   say "  confirmed by typing the name"
-  find "$1" \( -name node -o -name nodejs \) -type f -perm -100 2>/dev/null | while IFS= read -r p; do
+  find "$1" \( -name node -o -name nodejs -o -name node_repl \) -type f -perm -100 2>/dev/null | while IFS= read -r p; do
     say "  sha256 $(shasum -a 256 "$p" | awk '{print $1}')  $p"
   done
   stop_bundle "$1" "$id"
@@ -501,7 +501,7 @@ done)
 
 APPS=$RUNNING_APPS
 if [ "$MODE" != stop ]; then
-  section "node executables on disk (Mach-O files named node or nodejs; symlinks excluded)"
+  section "node executables on disk (Mach-O files named node, nodejs or node_repl; symlinks excluded)"
   printf '  searching; this can take a minute...\n'
   FILES=$(node_files)
   list_files "$FILES"
