@@ -52,6 +52,7 @@ TARGET_HOME=$(dscl . -read "/Users/$TARGET_USER" NFSHomeDirectory 2>/dev/null | 
 
 RECORD_DIR=$TARGET_HOME/mdm-defense
 RECORD=$RECORD_DIR/wipe-node-$MODE-$(date -u +%Y%m%dT%H%M%SZ).txt
+[ -e "$RECORD" ] && RECORD=${RECORD%.txt}-$$.txt  # never overwrite an earlier record
 mkdir -p "$RECORD_DIR" && : >"$RECORD" || exit 1
 [ $IS_ROOT -eq 1 ] && chown "$TARGET_USER" "$RECORD_DIR" "$RECORD"
 
