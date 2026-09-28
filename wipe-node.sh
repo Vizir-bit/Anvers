@@ -10,6 +10,12 @@
 #   bash wipe-node.sh remove     kill, then offer each application that runs or contains
 #                                node for deletion; loose node files are listed, not deleted
 #
+# An application's own files are those named by its bundle id, as a whole name or
+# a dotted component, or exactly by one of its names, plus the dot-folder named
+# after the last part of its bundle id (~/.codex for com.openai.codex). Items that
+# carry only its vendor's prefix or signing team are offered after it, separately.
+# Nothing is deleted until you type the name you are shown.
+#
 # Killing is lethal and precise: targets are frozen with SIGSTOP, which cannot be
 # caught or ignored, so no parent can restart a child it sees die; the frozen set
 # is widened until no member has an unfrozen descendant, and only then does each
@@ -51,6 +57,9 @@ mkdir -p "$RECORD_DIR" && : >"$RECORD" || exit 1
 
 say() { printf '%s\n' "$*"; printf '%s\n' "$*" >>"$RECORD"; }
 indent() { while IFS= read -r line; do say "    $line"; done; }
+indent_more() { while IFS= read -r line; do say "      $line"; done; }
+OWN=""
+VENDOR=""
 section() { say ""; say "== $*"; }
 
 # ---- processes -------------------------------------------------------------
@@ -188,17 +197,98 @@ bootout() {  # $1 = launchd plist; unload its job so launchd cannot restart what
   if launchctl bootout "$domain/$label" 2>/dev/null; then say "  unloaded $domain/$label"; fi
 }
 
-support_paths() {  # $1 = valid bundle id, $2 = bundle name; what the app keeps outside its bundle
+LIBRARY_DIRS='Application Support
+Caches
+Preferences
+Preferences/ByHost
+HTTPStorages
+Saved Application State
+WebKit
+Containers
+Group Containers
+Application Scripts
+Logs
+Cookies
+LaunchAgents
+LaunchDaemons
+PrivilegedHelperTools'
+
+library_find() {  # $@ = find name tests; entries directly inside each Library folder, user and system
   local sub base
-  for sub in "Application Support" Caches Preferences Preferences/ByHost HTTPStorages \
-    "Saved Application State" WebKit Containers "Group Containers" "Application Scripts" \
-    Logs Cookies LaunchAgents LaunchDaemons PrivilegedHelperTools; do
+  while IFS= read -r sub; do
     for base in "$TARGET_HOME/Library/$sub" "/Library/$sub"; do
       [ -d "$base" ] || continue
-      find "$base" -mindepth 1 -maxdepth 1 \( -name "$1" -o -name "$1.*" -o -name "*.$1" \
-        -o -name "*.$1.*" -o -name "$2" \) 2>/dev/null
+      find "$base" -mindepth 1 -maxdepth 1 \( "$@" \) 2>/dev/null
     done
-  done | sort -u
+  done <<EOF
+$LIBRARY_DIRS
+EOF
+}
+
+app_names() {  # $1 = bundle; the names the app goes by, safe as exact name patterns
+  { basename "$1" .app; plist_get "$1" CFBundleName; plist_get "$1" CFBundleDisplayName; } |
+    grep -v -e '^$' -e '[][*?/]' | sort -u
+}
+
+team_of() {  # $1 = bundle; the signing team identifier, if the bundle has one
+  codesign -dvv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p' | grep -E '^[A-Z0-9]{10}$'
+}
+
+support_paths() {  # $1 = bundle, $2 = valid bundle id; what the app keeps outside its bundle
+  local bundle=$1 id=$2 names n p
+  names=$(app_names "$bundle")
+  set -- -name "$id" -o -name "$id.*" -o -name "*.$id" -o -name "*.$id.*"
+  while IFS= read -r n; do
+    [ -n "$n" ] && set -- "$@" -o -name "$n"
+  done <<EOF
+$names
+EOF
+  {
+    library_find "$@"
+    # the dot-folder named after the last part of the bundle id, as ~/.codex for com.openai.codex
+    for p in "$TARGET_HOME/.${id##*.}" "$TARGET_HOME/.config/${id##*.}"; do
+      if [ -e "$p" ] || [ -L "$p" ]; then printf '%s\n' "$p"; fi
+    done
+  } | sort -u
+}
+
+vendor_paths() {  # $1 = valid bundle id, $2 = team id (may be empty); items of the same vendor or signing team
+  local vendor=${1%.*}
+  valid_id "$vendor" || return 0
+  if [ -n "$2" ]; then
+    library_find -name "$vendor.*" -o -name "*.$vendor.*" -o -name "$2.*"
+  else
+    library_find -name "$vendor.*" -o -name "*.$vendor.*"
+  fi | sort -u
+}
+
+minus() {  # lines of list $1 that are neither in list $2 nor inside bundle $3
+  printf '%s\n' "$1" | while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    if [ -n "$3" ]; then
+      case $l in "$3" | "$3"/*) continue ;; esac
+    fi
+    case "
+$2
+" in *"
+$l
+"*) continue ;; esac
+    printf '%s\n' "$l"
+  done
+}
+
+deletion_lists() {  # $1 = bundle, $2 = valid bundle id; sets OWN and VENDOR for the preview and the deletion
+  OWN=$({ support_paths "$1" "$2"; launch_items "$1" "$2"; } | sort -u)
+  OWN=$(minus "$OWN" "" "$1")
+  VENDOR=$(minus "$(vendor_paths "$2" "$(team_of "$1")")" "$OWN" "$1")
+}
+
+delete_paths() {  # $1 = newline list of paths
+  printf '%s\n' "$1" | while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    rm -rf -- "$p" 2>/dev/null
+    if [ -e "$p" ] || [ -L "$p" ]; then say "  [!!] could not delete $p"; else say "  [OK] deleted $p"; fi
+  done
 }
 
 tcc_grants() {  # $1 = valid bundle id; what the privacy databases record for it
@@ -228,16 +318,30 @@ reset_tcc() {  # $1 = valid bundle id; withdraw every privacy grant while tccuti
 }
 
 describe_app() {  # $1 = bundle
-  local id ver
+  local id ver out team
   id=$(plist_get "$1" CFBundleIdentifier)
   ver=$(plist_get "$1" CFBundleShortVersionString)
   say "  $1"
   say "    bundle id ${id:-unknown}, version ${ver:-unknown}"
   codesign -dvv "$1" 2>&1 | grep -E '^(Authority|TeamIdentifier|Timestamp)=' | indent
+  if out=$(codesign --verify --deep --strict "$1" 2>&1); then
+    say "    signature verified: the bundle is unchanged since it was signed"
+  else
+    say "    [!!] signature verification failed:"
+    printf '%s\n' "$out" | indent
+  fi
   say "    processes running from it: $(bundle_rows "$1" | grep -c .)"
   if valid_id "$id"; then
     launch_items "$1" "$id" | while IFS= read -r p; do say "    launch item: $p"; done
     tcc_grants "$id"
+    if ! protected "$1" "$id"; then
+      deletion_lists "$1" "$id"
+      team=$(team_of "$1")
+      say "    its own files outside the bundle, which remove offers with it:"
+      printf '%s\n' "${OWN:-none}" | indent_more
+      say "    other items of vendor ${id%.*}${team:+ or team $team}, which remove offers separately:"
+      printf '%s\n' "${VENDOR:-none}" | indent_more
+    fi
   fi
 }
 
@@ -288,7 +392,7 @@ stop_bundle() {  # $1 = bundle, $2 = bundle id (may be empty)
 }
 
 remove_bundle() {  # $1 = bundle
-  local name id paths answer p
+  local name id vendor answer p
   name=$(basename "$1" .app)
   id=$(plist_get "$1" CFBundleIdentifier)
   section "delete $1?"
@@ -296,15 +400,16 @@ remove_bundle() {  # $1 = bundle
     say "  refused: this belongs to macOS"
     return
   fi
-  paths=""
+  OWN=""
+  VENDOR=""
   if valid_id "$id"; then
-    paths=$({ support_paths "$id" "$name"; launch_items "$1" "$id"; } | grep -vF "$1/" | sort -u)
+    deletion_lists "$1" "$id"
   else
     say "  no usable bundle id, so only the bundle itself is offered"
   fi
   say "  would delete:"
   say "    $1"
-  [ -n "$paths" ] && printf '%s\n' "$paths" | indent
+  [ -n "$OWN" ] && printf '%s\n' "$OWN" | indent
   printf '  Type %s to delete all of this, or press Return to keep it: ' "$name" >/dev/tty
   answer=""
   read -r answer </dev/tty
@@ -326,11 +431,20 @@ remove_bundle() {  # $1 = bundle
   else
     say "  [OK] deleted $1"
   fi
-  printf '%s\n' "$paths" | while IFS= read -r p; do
-    [ -n "$p" ] || continue
-    rm -rf -- "$p" 2>/dev/null
-    if [ -e "$p" ] || [ -L "$p" ]; then say "  [!!] could not delete $p"; else say "  [OK] deleted $p"; fi
-  done
+  delete_paths "$OWN"
+  [ -n "$VENDOR" ] || return 0
+  vendor=${id%.*}
+  say "  other items of vendor $vendor or its signing team, not tied to this app by name:"
+  printf '%s\n' "$VENDOR" | indent
+  printf '  Type %s to delete these too, or press Return to keep them: ' "$vendor" >/dev/tty
+  answer=""
+  read -r answer </dev/tty
+  if [ "$answer" != "$vendor" ]; then
+    say "  kept"
+    return
+  fi
+  say "  confirmed by typing $vendor"
+  delete_paths "$VENDOR"
 }
 
 verify() {  # $1 = newline list of bundles that were acted on
