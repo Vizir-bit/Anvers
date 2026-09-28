@@ -1,0 +1,144 @@
+#!/bin/bash
+# A stand-in for the Mullvad command-line tool, for tests only. It keeps its settings in
+# $FAKE_STATE and prints output in the formats of the real tool at release 2026.5 (and of the
+# next generation when FAKE_GEN=B). It rejects values the real tool would reject, so that a
+# script sending a wrong command fails the tests.
+set -eu
+
+state=${FAKE_STATE:?}
+gen=${FAKE_GEN:-A}
+
+get() { sed -n "s/^$1=//p" "$state" | tail -n 1; }
+put() { printf '%s=%s\n' "$1" "$2" >>"$state"; }
+opt() { printf '    %-24s%s\n' "$1:" "$2"; }
+bad() { echo "error: invalid value '$*'" >&2; exit 2; }
+onoff() { case $1 in on|off) ;; *) bad "$1" ;; esac; }
+cc() { case $1 in any|[a-z][a-z]) ;; *) bad "$1" ;; esac; }
+
+multihop_on() {
+    case "$gen/$(get multihop)" in A/on|B/always) return 0 ;; *) return 1 ;; esac
+}
+
+features() {
+    {
+        [ "$(get daita)" = on ] && echo "DAITA"
+        multihop_on && echo "Multihop"
+        [ "$(get qr)" = on ] && echo "Quantum Resistance"
+        [ "$(get lockdown)" = on ] && echo "Lockdown Mode"
+        [ -n "$(get dns_blocks)" ] && echo "Dns Content Blocker"
+        [ "$(get mode)" = quic ] && echo "Quic"
+        [ "$(get lan)" = allow ] && echo "LAN Sharing"
+        [ "$(get split)" = on ] && echo "Split Tunneling"
+        true
+    } | sort | paste -sd, - | sed 's/,/, /g'
+}
+
+relay_line() {
+    exit_cc=$(get location)
+    [ "$exit_cc" = any ] && exit_cc=se
+    if multihop_on; then
+        entry_cc=$(get entry)
+        # In generation A, "direct only" off makes DAITA pick the entry near the exit.
+        if [ "$gen" = A ] && [ "$(get daita)" = on ] && [ "$(get direct_only)" = off ]; then
+            entry_cc=$exit_cc
+        fi
+        echo "$exit_cc-xxx-wg-001 via $entry_cc-yyy-wg-002"
+    else
+        echo "$exit_cc-xxx-wg-001"
+    fi
+}
+
+cmd="$*"
+case $cmd in
+    --version) echo "mullvad $(get version)" ;;
+    "tunnel set --help")
+        echo "Commands: mtu quantum-resistant daita"
+        [ "$gen" = A ] && echo "  daita-direct-only"
+        echo "  allowed-ips rotation-interval rotate-key ipv6 userspace" ;;
+    "relay set multihop --help")
+        if [ "$gen" = B ]; then echo "  [possible values: always, auto, never]"; else echo "Usage: mullvad relay set multihop <USE_MULTIHOP>"; fi ;;
+    version)
+        echo "Current version       : $(get version)"
+        echo "Is supported          : true"
+        echo "Suggested upgrade     : none" ;;
+    "lockdown-mode get") echo "Block traffic when the VPN is disconnected: $(get lockdown)" ;;
+    "lockdown-mode set "*) onoff "$3"; put lockdown "$3" ;;
+    "auto-connect get") echo "Autoconnect: $(get autoconnect)" ;;
+    "auto-connect set "*) onoff "$3"; put autoconnect "$3" ;;
+    "lan get") echo "Local network sharing setting: $(get lan)" ;;
+    "lan set "*) case $3 in allow|block) put lan "$3" ;; *) bad "$3" ;; esac ;;
+    "split-tunnel get") echo "Split tunneling state: $(get split)"; echo "Excluded applications:" ;;
+    "split-tunnel set "*) onoff "$3"; put split "$3" ;;
+    "tunnel get")
+        echo "WireGuard options"
+        opt "MTU" unset
+        opt "Quantum resistance" "$(get qr)"
+        if [ "$(get daita)" = on ]; then opt "DAITA" true; else opt "DAITA" false; fi
+        opt "Public key" "AAAA"
+        opt "Rotation interval" unset
+        echo "Generic options"
+        opt "IPv6" "$(get ipv6)" ;;
+    "tunnel set quantum-resistant "*) onoff "$4"; put qr "$4" ;;
+    "tunnel set daita "*) onoff "$4"; put daita "$4" ;;
+    "tunnel set daita-direct-only "*) [ "$gen" = A ] || bad "daita-direct-only"; onoff "$4"; put direct_only "$4" ;;
+    "tunnel set ipv6 "*) onoff "$4"; put ipv6 "$4" ;;
+    "dns get")
+        echo "Custom DNS: no"
+        for b in ads trackers malware adult-content gambling social-media; do
+            label=$(echo "$b" | tr '-' ' ')
+            if echo " $(get dns_blocks) " | grep -q " $b "; then v=true; else v=false; fi
+            echo "Block $label: $v"
+        done ;;
+    "dns set default"*)
+        blocks=""
+        shift 3
+        for f in "$@"; do
+            case $f in
+                --block-ads|--block-trackers|--block-malware|--block-adult-content|--block-gambling|--block-social-media)
+                    blocks="$blocks ${f#--block-}" ;;
+                *) bad "$f" ;;
+            esac
+        done
+        put dns_blocks "${blocks# }" ;;
+    "anti-censorship get") echo "mode: $(get mode)"; echo "udp2tcp settings: any" ;;
+    "anti-censorship set mode "*)
+        case $4 in auto|off|wireguard-port|udp2tcp|shadowsocks|quic|lwo) put mode "$4" ;; *) bad "$4" ;; esac ;;
+    "relay get")
+        echo "Generic constraints"
+        opt "Location" "country $(get location)"
+        echo "WireGuard constraints"
+        if [ "$gen" = A ]; then
+            if [ "$(get multihop)" = on ]; then opt "Multihop state" enabled; else opt "Multihop state" disabled; fi
+        else
+            case $(get multihop) in always) opt "Multihop state" Always ;; never) opt "Multihop state" Never ;; *) opt "Multihop state" Auto ;; esac
+        fi
+        opt "Multihop entry" "country $(get entry)" ;;
+    "relay set ip-version "*) case $4 in any|v4|v6) put ipversion "$4" ;; *) bad "$4" ;; esac ;;
+    "relay set ownership "*) case $4 in any|owned|rented) put ownership "$4" ;; *) bad "$4" ;; esac ;;
+    "relay set location "*) cc "$4"; put location "$4" ;;
+    "relay set entry location "*) cc "$5"; put entry "$5" ;;
+    "relay set multihop "*)
+        if [ "$gen" = A ]; then onoff "$4"; else case $4 in always|auto|never) ;; *) bad "$4" ;; esac; fi
+        put multihop "$4" ;;
+    "disconnect --wait"|disconnect) put connected no ;;
+    connect) put connected yes ;;
+    status)
+        if [ "$(get connected)" = yes ]; then
+            if [ "$(get logged_in)" = no ]; then
+                echo "Warning: You are not logged in to an account."
+                echo "Connecting"
+            elif [ "${FAKE_NO_RELAY:-0}" = 1 ]; then
+                echo "Blocked: No relay server matches the current settings"
+            else
+                echo "Connected"
+                opt "Relay" "$(relay_line)"
+                opt "Features" "$(features)"
+                opt "Visible location" "Testland, Testcity. IPv4: 203.0.113.9"
+            fi
+        else
+            echo "Disconnected"
+            [ "$(get lockdown)" = on ] && printf '%28s%s\n' '' "Internet access is blocked due to lockdown mode"
+            opt "Visible location" "Hometown, Homecity. IPv4: 198.51.100.44"
+        fi ;;
+    *) echo "fake-mullvad: unhandled command: $cmd" >&2; exit 2 ;;
+esac

@@ -1,0 +1,14 @@
+{
+  "locations": {},
+  "wireguard": {
+    "relays": [
+      {"hostname": "de-fra-wg-001", "location": "de-fra", "active": true, "owned": false, "daita": true, "features": {"daita": {}, "quic": {"addr_in": []}, "lwo": {}}},
+      {"hostname": "de-fra-wg-002", "location": "de-fra", "active": true, "owned": true, "daita": true, "features": {"daita": {}}},
+      {"hostname": "nl-ams-wg-001", "location": "nl-ams", "active": true, "owned": false, "features": {"quic": {"addr_in": []}}},
+      {"hostname": "se-got-wg-001", "location": "se-got", "active": true, "owned": true, "daita": true, "features": {"daita": {}, "quic": {"addr_in": []}}},
+      {"hostname": "ch-zrh-wg-001", "location": "ch-zrh", "active": true, "owned": false, "features": {}},
+      {"hostname": "fr-par-wg-001", "location": "fr-par", "active": false, "owned": true, "daita": true, "features": {"daita": {}, "quic": {"addr_in": []}}},
+      {"hostname": "no-osl-wg-001", "location": "no-osl", "active": true, "owned": true, "include_in_country": false, "daita": true, "features": {"daita": {}, "quic": {"addr_in": []}}}
+    ]
+  }
+}
