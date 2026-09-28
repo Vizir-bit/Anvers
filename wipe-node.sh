@@ -117,9 +117,11 @@ runs() {  # $1 = pid, $2 = executable; true while that pid lives and still runs 
 }
 
 kill_tree() {  # $1 = pids, one per line; freeze them and every descendant, then kill them all
-  local frozen seen snap grew pid exe pass left i
+  local frozen seen gone refused snap grew pid exe pass left i
   frozen=""
   seen=" "
+  gone=""
+  refused=""
   pass=0
   while [ $pass -lt 10 ]; do
     snap=$(tree "$1")
@@ -127,19 +129,32 @@ kill_tree() {  # $1 = pids, one per line; freeze them and every descendant, then
     while read -r pid exe; do
       [ -n "$pid" ] || continue
       case $seen in *" $pid "*) continue ;; esac
-      runs "$pid" "$exe" && kill -STOP "$pid" 2>/dev/null
       seen="$seen$pid "
-      frozen="$frozen$pid $exe
-"
       grew=1
+      if ! runs "$pid" "$exe"; then
+        gone="$gone$pid "
+      elif kill -STOP "$pid" 2>/dev/null; then
+        frozen="$frozen$pid $exe
+"
+      else
+        refused="$refused$pid "
+      fi
     done <<EOF
 $snap
 EOF
     [ $grew -eq 1 ] || break
     pass=$((pass + 1))
   done
-  [ -n "$frozen" ] || return 0
-  say "  frozen:$seen"
+  [ -n "$gone" ] && say "  already exited, not signalled: $gone"
+  if [ -n "$refused" ]; then
+    say "  [!!] could not freeze: $refused"
+    [ $IS_ROOT -eq 0 ] && say "       run with sudo if they belong to another user"
+  fi
+  if [ -z "$frozen" ]; then
+    [ -z "$refused" ]
+    return
+  fi
+  say "  frozen: $(printf '%s\n' "$frozen" | awk 'NF { printf "%s ", $1 }')"
   printf '%s\n' "$frozen" | while read -r pid exe; do
     runs "$pid" "$exe" && kill -KILL "$pid" 2>/dev/null
   done
@@ -158,6 +173,7 @@ EOF
     return 1
   fi
   say "  [OK] killed $(printf '%s\n' "$frozen" | grep -c .) processes"
+  [ -z "$refused" ]
 }
 
 # ---- applications ----------------------------------------------------------
