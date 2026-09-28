@@ -108,23 +108,25 @@ runs() {  # $1 = pid, $2 = executable; true while that pid lives and still runs 
 }
 
 kill_tree() {  # $1 = pids, one per line; freeze them and every descendant, then kill them all
-  local frozen seen new pid exe pass left i
+  local frozen seen snap grew pid exe pass left i
   frozen=""
   seen=" "
   pass=0
   while [ $pass -lt 10 ]; do
-    new=$(tree "$1" | while read -r pid exe; do
-      case $seen in *" $pid "*) continue ;; esac
-      printf '%s %s\n' "$pid" "$exe"
-    done)
-    [ -n "$new" ] || break
+    snap=$(tree "$1")
+    grew=0
     while read -r pid exe; do
+      [ -n "$pid" ] || continue
+      case $seen in *" $pid "*) continue ;; esac
       runs "$pid" "$exe" && kill -STOP "$pid" 2>/dev/null
       seen="$seen$pid "
+      frozen="$frozen$pid $exe
+"
+      grew=1
     done <<EOF
-$new
+$snap
 EOF
-    frozen=$(printf '%s\n%s\n' "$frozen" "$new" | grep .)
+    [ $grew -eq 1 ] || break
     pass=$((pass + 1))
   done
   [ -n "$frozen" ] || return 0
